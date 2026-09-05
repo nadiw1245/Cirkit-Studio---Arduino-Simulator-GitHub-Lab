@@ -1,0 +1,6 @@
+{
+  "name": "Cirkit Studio - Arduino Simulator & GitHub Lab",
+  "description": "Interactive Arduino UNO Q and Ventuno Q circuit simulator for students with multi-file code editor, real-time electronics simulation, AI circuit copilot, and GitHub repo showcase & star generator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
