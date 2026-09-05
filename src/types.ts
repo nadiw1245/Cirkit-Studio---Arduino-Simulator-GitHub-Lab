@@ -83,10 +83,18 @@ export interface ProjectBlueprint {
   board: BoardType;
   sketch: string;
   components: Array<{
+    id?: string;
     type: ComponentType;
     x: number;
     y: number;
     properties?: Record<string, any>;
-    pins: Record<string, { boardPin: string; wireColor: string }>;
+    pins?: Record<string, { boardPin: string; wireColor: string }>;
+  }>;
+  wires?: Array<{
+    fromCompId: string;
+    fromPinId: string;
+    toCompId: string;
+    toPinId: string;
+    color: string;
   }>;
 }

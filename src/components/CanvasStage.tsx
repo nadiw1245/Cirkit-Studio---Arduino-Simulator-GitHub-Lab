@@ -1,6 +1,8 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useMemo } from 'react';
 import { BoardType, PlacedComponent, CircuitWire } from '../types';
 import { playWireSnap } from '../utils/audio';
+import { evaluateCircuit } from '../utils/circuitAnalysis';
+import { VentunoBoardSvg } from './VentunoBoardSvg';
 
 interface CanvasStageProps {
   boardType: BoardType;
@@ -38,6 +40,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const [activePin, setActivePin] = useState<{ compId: string; pinId: string; pinName: string } | null>(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [hoverTooltip, setHoverTooltip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [showPinoutCallouts, setShowPinoutCallouts] = useState(true);
 
   // Convert client coordinates to SVG coordinates
   const getSVGPoint = (clientX: number, clientY: number) => {
@@ -87,21 +90,52 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     targetEl.addEventListener('pointercancel', onPointerUp);
   };
 
-  // Calculate pin coordinates in SVG space
+  // Calculate pin coordinates in SVG space with robust alias resolution
   const getPinCoordinates = (compId: string, pinId: string) => {
     if (!svgRef.current) return { x: 0, y: 0 };
     const selector = compId === 'board'
       ? `.board-node .terminal-pin-group[data-pin="${pinId}"]`
       : `#${compId} .terminal-pin-group[data-pin="${pinId}"]`;
-    const pinEl = svgRef.current.querySelector(selector);
-    if (!pinEl) return { x: 0, y: 0 };
+    let pinEl = svgRef.current.querySelector(selector);
+
+    // Fallback alias resolution for cross-board compatibility
+    if (!pinEl && compId === 'board') {
+      const aliases: Record<string, string[]> = {
+        'TX': ['D1'],
+        'D1': ['TX'],
+        'RX': ['D0'],
+        'D0': ['RX'],
+        'GND': ['GND_D1', 'GND_P1', 'GND_P2', 'TERM_GND1', 'TERM_GND2'],
+        'GND_D1': ['GND', 'TERM_GND1', 'GND_P1'],
+        'GND_P1': ['GND', 'GND_D1', 'TERM_GND1'],
+        '5V': ['TERM_VIN', 'RPI_5V_1'],
+        '3V3': ['RPI_3V3', 'IOREF']
+      };
+      const candidateList = aliases[pinId] || [];
+      for (const candidate of candidateList) {
+        pinEl = svgRef.current.querySelector(`.board-node .terminal-pin-group[data-pin="${candidate}"]`);
+        if (pinEl) break;
+      }
+    }
+
+    if (!pinEl) {
+      if (compId === 'board') {
+        return { x: boardPos.x + 160, y: boardPos.y + 40 };
+      }
+      const comp = components.find(c => c.id === compId);
+      if (comp) {
+        return { x: comp.x + 40, y: comp.y + 40 };
+      }
+      return { x: 0, y: 0 };
+    }
 
     const pinCircle = pinEl.querySelector('.terminal-pin') || pinEl;
     const rect = pinCircle.getBoundingClientRect();
     const pt = svgRef.current.createSVGPoint();
     pt.x = rect.left + rect.width / 2;
     pt.y = rect.top + rect.height / 2;
-    return pt.matrixTransform(svgRef.current.getScreenCTM()?.inverse());
+    const transformed = pt.matrixTransform(svgRef.current.getScreenCTM()?.inverse());
+    return { x: transformed.x, y: transformed.y };
   };
 
   const handlePinClick = (e: React.MouseEvent, compId: string, pinId: string, pinName: string) => {
@@ -114,7 +148,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     } else {
       // Connect wire
       const newWire: CircuitWire = {
-        id: `wire_${Date.now()}`,
+        id: `wire_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         fromCompId: activePin.compId,
         fromPinId: activePin.pinId,
         toCompId: compId,
@@ -136,6 +170,25 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const isD13Active = Boolean(pinStates['D13']);
   const isD11PWM = Boolean(pinStates['D11']);
   const isD2Active = Boolean(pinStates['D2']);
+
+  // Complete circuit evaluation using network traversal
+  const circuitState = useMemo(() => {
+    return evaluateCircuit(
+      components,
+      wires,
+      {
+        ...pinStates,
+        '5V': 1,
+        '3V3': 1,
+        'VIN': 1,
+        'TERM_VIN': 1,
+        'RPI_5V_1': 1,
+        'RPI_5V_2': 1,
+        'RPI_3V3': 1
+      },
+      isSimulating
+    );
+  }, [components, wires, pinStates, isSimulating]);
 
   return (
     <div 
@@ -175,6 +228,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 bg-[#0f1622]/95 border border-cyan-500/50 text-cyan-300 text-xs font-mono px-3.5 py-1.5 rounded-full shadow-lg flex items-center gap-2 backdrop-blur-md">
           <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
           <span>Routing wire from <b>{activePin.pinName}</b> — Click another pin to connect (Esc to cancel)</span>
+        </div>
+      )}
+
+      {/* Ventuno Q Real Pinout Legend Toggle */}
+      {boardType === 'ventuno_q' && (
+        <div className="absolute top-3 right-4 z-30 flex items-center gap-2 bg-[#0b1320]/90 border border-[#1e2c40] px-3 py-1.5 rounded-lg shadow-xl backdrop-blur-sm text-xs font-mono">
+          <span className="text-slate-400">Pinout Legend Callout:</span>
+          <button
+            onClick={() => setShowPinoutCallouts(!showPinoutCallouts)}
+            className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
+              showPinoutCallouts 
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' 
+                : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {showPinoutCallouts ? 'VISIBLE' : 'HIDDEN'}
+          </button>
         </div>
       )}
 
@@ -271,56 +341,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           </filter>
         </defs>
 
-        {/* LAYER 1: WIRES */}
-        <g id="layerWires">
-          {wires.map((wire) => {
-            const start = getPinCoordinates(wire.fromCompId, wire.fromPinId);
-            const end = getPinCoordinates(wire.toCompId, wire.toPinId);
-            const dx = Math.abs(end.x - start.x) * 0.5;
-            const dy = (end.y - start.y) * 0.5;
-            const d = `M ${start.x} ${start.y} C ${start.x + dx} ${start.y + dy}, ${end.x - dx} ${end.y - dy}, ${end.x} ${end.y}`;
-
-            return (
-              <g key={wire.id} className="cursor-pointer group">
-                <path
-                  d={d}
-                  fill="none"
-                  stroke={wire.color}
-                  strokeWidth="4"
-                  strokeLinecap="round"
-                  className="transition-all hover:stroke-[6.5px] hover:filter-[drop-shadow(0_0_8px_currentColor)]"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDeleteWire(wire.id);
-                  }}
-                />
-                <title>Click to disconnect wire</title>
-              </g>
-            );
-          })}
-
-          {/* GHOST WIRE (when actively routing) */}
-          {activePin && (
-            (() => {
-              const start = getPinCoordinates(activePin.compId, activePin.pinId);
-              const dx = Math.abs(mousePos.x - start.x) * 0.5;
-              const dy = (mousePos.y - start.y) * 0.5;
-              const d = `M ${start.x} ${start.y} C ${start.x + dx} ${start.y + dy}, ${mousePos.x - dx} ${mousePos.y - dy}, ${mousePos.x} ${mousePos.y}`;
-              return (
-                <path
-                  d={d}
-                  fill="none"
-                  stroke={activeWireColor}
-                  strokeWidth="3.5"
-                  strokeDasharray="6 4"
-                  className="pointer-events-none animate-pulse"
-                />
-              );
-            })()
-          )}
-        </g>
-
-        {/* LAYER 2: ARDUINO BOARDS */}
+        {/* LAYER 1: ARDUINO BOARDS */}
         {boardType === 'uno_q' ? (
           <g
             id="unoBoard"
@@ -473,6 +494,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     data-pin={p.pin}
                     data-name={p.name}
                     transform={`translate(${p.x}, 11)`}
+                    onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => handlePinClick(e, 'board', p.pin, p.name)}
                     onMouseEnter={(e) => setHoverTooltip({ text: p.name, x: e.clientX, y: e.clientY })}
                     onMouseLeave={() => setHoverTooltip(null)}
@@ -522,6 +544,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     data-pin={p.pin}
                     data-name={p.name}
                     transform={`translate(${p.x}, 11)`}
+                    onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => handlePinClick(e, 'board', p.pin, p.name)}
                     onMouseEnter={(e) => setHoverTooltip({ text: p.name, x: e.clientX, y: e.clientY })}
                     onMouseLeave={() => setHoverTooltip(null)}
@@ -545,116 +568,30 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             </g>
           </g>
         ) : (
-          /* ARDUINO VENTUNO Q BOARD */
-          <g
-            id="ventunoBoard"
-            className="board-node cursor-grab active:cursor-grabbing"
-            transform={`translate(${boardPos.x}, ${boardPos.y})`}
+          /* REAL DETAILED SVG VIEW OF ARDUINO VENTUNO Q */
+          <VentunoBoardSvg
+            boardPos={boardPos}
             onPointerDown={(e) => handlePointerDown(e, 'board')}
-          >
-            <g transform="scale(0.92)">
-              <rect
-                filter="url(#boardLiftShadow)"
-                x="0"
-                y="0"
-                width="700"
-                height="560"
-                rx="18"
-                fill="url(#ventunoPcbGrad)"
-                stroke="#03123a"
-                strokeWidth="2.5"
-              />
-
-              {/* Qualcomm Dragonwing IQ-8275 SoM */}
-              <g transform="translate(390, 90)">
-                <rect x="0" y="0" width="118" height="126" rx="6" fill="#cbd5e1" stroke="#1e293b" strokeWidth="2"/>
-                <text x="59" y="68" fill="#1e293b" fontFamily="Space Grotesk" fontSize="9" fontWeight="800" textAnchor="middle">Qualcomm</text>
-              </g>
-              <text x="449" y="228" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="5.5" fontWeight="700" textAnchor="middle">DRAGONWING™ IQ-8275</text>
-
-              {/* Arduino UNO Shield Header - Compatible with UNO pin names for wiring */}
-              <g transform="translate(578, 30)">
-                <rect x="-12" y="-12" width="34" height="264" rx="4" fill="url(#headerShellBevel)" stroke="#000"/>
-                {[
-                  { pin: 'TX', label: 'D0', x: 0, y: 0 },
-                  { pin: 'RX', label: 'D1', x: 0, y: 14 },
-                  { pin: 'D2', label: 'D2', x: 0, y: 28 },
-                  { pin: 'D3', label: '~D3', x: 0, y: 42 },
-                  { pin: 'D4', label: 'D4', x: 0, y: 56 },
-                  { pin: 'D5', label: '~D5', x: 0, y: 70 },
-                  { pin: 'D6', label: '~D6', x: 0, y: 84 },
-                  { pin: 'D7', label: 'D7', x: 0, y: 98 },
-                  { pin: 'D8', label: 'D8', x: 0, y: 112 },
-                  { pin: 'D9', label: '~D9', x: 0, y: 126 },
-                  { pin: 'D10', label: '~D10', x: 0, y: 140 },
-                  { pin: 'D11', label: '~D11', x: 0, y: 154 },
-                  { pin: 'D12', label: 'D12', x: 0, y: 168 },
-                  { pin: 'D13', label: 'D13', x: 0, y: 182 },
-                  { pin: 'GND_D1', label: 'GND', x: 0, y: 196 },
-                  { pin: 'AREF', label: 'REF', x: 0, y: 210 },
-                  { pin: 'SDA', label: 'SDA', x: 0, y: 224 },
-                  { pin: 'SCL', label: 'SCL', x: 0, y: 238 },
-                ].map((p) => {
-                  const isSelected = activePin?.compId === 'board' && activePin?.pinId === p.pin;
-                  return (
-                    <g
-                      key={p.pin}
-                      className="terminal-pin-group cursor-crosshair"
-                      data-pin={p.pin}
-                      transform={`translate(${p.x}, ${p.y})`}
-                      onClick={(e) => handlePinClick(e, 'board', p.pin, `Ventuno ${p.label}`)}
-                    >
-                      <circle className="terminal-hitbox" r="7" fill="transparent"/>
-                      <circle className="terminal-pin" r={isSelected ? '5' : '3'} fill={isSelected ? '#38bdf8' : 'url(#pinMetal)'}/>
-                      <text x="24" y="2.5" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="5.6">{p.label}</text>
-                    </g>
-                  );
-                })}
-              </g>
-
-              {/* Power & Analog Header */}
-              <g transform="translate(578, 316)">
-                <rect x="-12" y="-12" width="34" height="196" rx="4" fill="url(#headerShellBevel)" stroke="#000"/>
-                {[
-                  { pin: 'IOREF', label: 'IOREF', x: 0, y: 0 },
-                  { pin: 'RESET_PIN', label: 'RST', x: 0, y: 14 },
-                  { pin: '3V3', label: '3V3', x: 0, y: 28 },
-                  { pin: '5V', label: '5V', x: 0, y: 42 },
-                  { pin: 'GND_P1', label: 'GND', x: 0, y: 56 },
-                  { pin: 'GND_P2', label: 'GND', x: 0, y: 70 },
-                  { pin: 'VIN', label: 'VIN', x: 0, y: 84 },
-                  { pin: 'A0', label: 'A0', x: 0, y: 98 },
-                  { pin: 'A1', label: 'A1', x: 0, y: 112 },
-                  { pin: 'A2', label: 'A2', x: 0, y: 126 },
-                  { pin: 'A3', label: 'A3', x: 0, y: 140 },
-                  { pin: 'A4', label: 'A4', x: 0, y: 154 },
-                  { pin: 'A5', label: 'A5', x: 0, y: 168 },
-                ].map((p) => {
-                  const isSelected = activePin?.compId === 'board' && activePin?.pinId === p.pin;
-                  return (
-                    <g
-                      key={p.pin}
-                      className="terminal-pin-group cursor-crosshair"
-                      data-pin={p.pin}
-                      transform={`translate(${p.x}, ${p.y})`}
-                      onClick={(e) => handlePinClick(e, 'board', p.pin, `Ventuno ${p.label}`)}
-                    >
-                      <circle className="terminal-hitbox" r="7" fill="transparent"/>
-                      <circle className="terminal-pin" r={isSelected ? '5' : '3'} fill={isSelected ? '#38bdf8' : 'url(#pinMetal)'}/>
-                      <text x="24" y="2.5" fill="#38bdf8" fontFamily="JetBrains Mono" fontSize="5.6">{p.label}</text>
-                    </g>
-                  );
-                })}
-              </g>
-            </g>
-          </g>
+            activePin={activePin}
+            onPinClick={handlePinClick}
+            setHoverTooltip={setHoverTooltip}
+            isSimulating={isSimulating}
+            pinStates={pinStates}
+            ledMatrixState={ledMatrixState}
+            showCalloutAnnotations={showPinoutCallouts}
+          />
         )}
 
-        {/* LAYER 3: PLACED COMPONENTS */}
+        {/* LAYER 2: PLACED COMPONENTS */}
         <g id="layerComponents">
           {components.map((comp) => {
-            const isLedPowered = isSimulating && comp.type === 'led' && isD13Active;
-            const isBuzzerSounding = isSimulating && comp.type === 'buzzer' && isD11PWM;
+            const ledEval = circuitState.energizedLeds[comp.id];
+            const isLedPowered = Boolean(ledEval?.energized);
+            const isDirectShort = Boolean(ledEval?.directShortWarning);
+            const isBuzzerSounding = Boolean(circuitState.activeBuzzers[comp.id]?.active);
+            const isResistorEnergized = Boolean(circuitState.energizedResistors[comp.id]);
+            const isSensorPowered = Boolean(circuitState.activeSensors[comp.id]?.powered);
+            const isServoPowered = Boolean(circuitState.activeServos[comp.id]?.powered);
 
             return (
               <g
@@ -671,7 +608,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     <circle
                       cx="40"
                       cy="30"
-                      r="32"
+                      r={isDirectShort ? '38' : '32'}
                       fill={comp.properties.color === 'green' ? 'url(#ledGlowGreen)' : comp.properties.color === 'blue' ? 'url(#ledGlowBlue)' : 'url(#ledGlowRed)'}
                       opacity={isLedPowered ? 1 : 0}
                       className="transition-opacity duration-150 pointer-events-none"
@@ -682,7 +619,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     <path
                       d="M 22 42 L 22 22 A 18 18 0 0 1 58 22 L 58 42 Z"
                       fill={comp.properties.color === 'green' ? 'url(#ledGreenDome)' : comp.properties.color === 'blue' ? 'url(#ledBlueDome)' : 'url(#ledRedDome)'}
-                      stroke="#7f1d1d"
+                      stroke={isDirectShort ? '#eab308' : '#7f1d1d'}
                       strokeWidth="1.2"
                     />
                     <ellipse cx="32" cy="18" rx="4" ry="9" fill="rgba(255,255,255,0.45)" transform="rotate(-22 32 18)"/>
@@ -690,24 +627,46 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                       5mm {comp.properties.color?.toUpperCase() || 'LED'}
                     </text>
 
+                    {/* Direct short overcurrent warning badge */}
+                    {isDirectShort && (
+                      <g transform="translate(14, 90)">
+                        <rect x="0" y="0" width="52" height="12" rx="3" fill="#fef08a" stroke="#ca8a04" strokeWidth="0.8"/>
+                        <text x="26" y="8.5" fill="#854d0e" fontFamily="JetBrains Mono" fontSize="5.5" fontWeight="bold" textAnchor="middle">
+                          ⚠️ NO RESISTOR
+                        </text>
+                      </g>
+                    )}
+
                     {/* Anode (+) and Cathode (-) Pins */}
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="anode"
                       transform="translate(28, 72)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'anode', 'LED Anode (+)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'anode', 'LED Anode (+)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'LED Anode (+)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="cathode"
                       transform="translate(56, 72)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'cathode', 'LED Cathode (-)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'cathode', 'LED Cathode (-)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'LED Cathode (-)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
@@ -715,8 +674,25 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 {/* RESISTOR */}
                 {comp.type === 'resistor' && (
                   <>
-                    <line x1="0" y1="30" x2="80" y2="30" stroke="#cbd5e1" strokeWidth="2.5" strokeLinecap="round"/>
-                    <rect x="18" y="18" width="44" height="24" rx="8" fill="url(#resistorBody)" stroke="#9a7b56" strokeWidth="1.2"/>
+                    <line
+                      x1="0"
+                      y1="30"
+                      x2="80"
+                      y2="30"
+                      stroke={isResistorEnergized ? '#f59e0b' : '#cbd5e1'}
+                      strokeWidth={isResistorEnergized ? '3' : '2.5'}
+                      strokeLinecap="round"
+                    />
+                    <rect
+                      x="18"
+                      y="18"
+                      width="44"
+                      height="24"
+                      rx="8"
+                      fill="url(#resistorBody)"
+                      stroke={isResistorEnergized ? '#f59e0b' : '#9a7b56'}
+                      strokeWidth={isResistorEnergized ? '1.8' : '1.2'}
+                    />
                     <rect x="26" y="18" width="4.5" height="24" fill="#dc2626"/>
                     <rect x="34" y="18" width="4.5" height="24" fill="#dc2626"/>
                     <rect x="42" y="18" width="4.5" height="24" fill="#78350f"/>
@@ -724,23 +700,40 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     <text x="40" y="54" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="7.5" fontWeight="700" textAnchor="middle">
                       {comp.properties.label || '220Ω'}
                     </text>
+                    {isResistorEnergized && (
+                      <text x="40" y="64" fill="#f59e0b" fontFamily="JetBrains Mono" fontSize="6" fontWeight="bold" textAnchor="middle">
+                        ⚡ CURRENT ACTIVE
+                      </text>
+                    )}
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="p1"
                       transform="translate(2, 30)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'p1', 'Resistor Lead 1')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'p1', 'Resistor Lead 1');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Resistor Lead 1', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="p2"
                       transform="translate(78, 30)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'p2', 'Resistor Lead 2')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'p2', 'Resistor Lead 2');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Resistor Lead 2', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
@@ -750,29 +743,46 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   <>
                     {/* Acoustic Sound Wave Rings when active */}
                     {isBuzzerSounding && (
-                      <circle cx="40" cy="38" r="38" fill="none" stroke="#38bdf8" strokeWidth="1.5" className="animate-ping opacity-75"/>
+                      <circle cx="40" cy="38" r="38" fill="none" stroke="#38bdf8" strokeWidth="2" className="animate-ping opacity-75"/>
                     )}
-                    <circle cx="40" cy="38" r="30" fill="#1e293b" stroke="#475569" strokeWidth="1.8"/>
+                    <circle cx="40" cy="38" r="30" fill="#1e293b" stroke={isBuzzerSounding ? '#38bdf8' : '#475569'} strokeWidth="1.8"/>
                     <circle cx="40" cy="38" r="10" fill="#090d14" stroke="#000" strokeWidth="1.5"/>
                     <text x="40" y="20" fill="#ef4444" fontFamily="Space Grotesk" fontSize="11" fontWeight="800" textAnchor="middle">+</text>
                     <text x="40" y="78" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="7" fontWeight="700" textAnchor="middle">BUZZER</text>
+                    {isBuzzerSounding && (
+                      <text x="40" y="88" fill="#38bdf8" fontFamily="JetBrains Mono" fontSize="6" fontWeight="bold" textAnchor="middle">
+                        🔊 587 Hz TONE
+                      </text>
+                    )}
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="pos"
                       transform="translate(22, 64)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'pos', 'Buzzer (+)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'pos', 'Buzzer (+)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Buzzer Positive (+)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="neg"
                       transform="translate(58, 64)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'neg', 'Buzzer (-)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'neg', 'Buzzer (-)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Buzzer Negative (-)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
@@ -782,35 +792,53 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   <>
                     <rect x="4" y="4" width="72" height="84" rx="5" fill="#0284c7" stroke="#0369a1" strokeWidth="1.8"/>
                     <circle cx="28" cy="8" r="7.5" fill="#7dd3fc" stroke="#38bdf8" strokeWidth="1.2"/>
-                    <circle cx="52" cy="8" r="7.5" fill={isSimulating && isD2Active ? '#4ade80' : '#1e1b4b'} stroke="#312e81" strokeWidth="1.2"/>
+                    <circle cx="52" cy="8" r="7.5" fill={isSensorPowered ? '#4ade80' : '#1e1b4b'} stroke="#312e81" strokeWidth="1.2"/>
                     <rect x="22" y="32" width="36" height="22" rx="2" fill="#0f172a" stroke="#334155"/>
                     <text x="40" y="46" fill="#94a3b8" fontFamily="JetBrains Mono" fontSize="6" fontWeight="700" textAnchor="middle">LM393</text>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="vcc"
                       transform="translate(18, 86)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'vcc', 'Sensor VCC (5V)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'vcc', 'Sensor VCC (5V)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Sensor VCC (5V)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="gnd"
                       transform="translate(40, 86)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'gnd', 'Sensor GND')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'gnd', 'Sensor GND');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Sensor GND', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="out"
                       transform="translate(62, 86)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'out', 'Sensor OUT (Pin 2)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'out', 'Sensor OUT (Pin 2)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Sensor OUT (Pin 2)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
@@ -834,22 +862,34 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     />
                     <text x="40" y="78" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="6.5" fontWeight="700" textAnchor="middle">BUTTON</text>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="p1"
                       transform="translate(10, 40)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'p1', 'Button Terminal 1')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'p1', 'Button Terminal 1');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Button Terminal 1', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="p2"
                       transform="translate(70, 40)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'p2', 'Button Terminal 2')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'p2', 'Button Terminal 2');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Button Terminal 2', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
@@ -870,31 +910,49 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     />
                     <text x="40" y="82" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="6.5" fontWeight="700" textAnchor="middle">10k POT</text>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="vcc"
                       transform="translate(18, 70)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'vcc', 'Pot 5V')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'vcc', 'Pot 5V');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Pot 5V', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="wiper"
                       transform="translate(40, 70)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'wiper', 'Pot Wiper (A0)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'wiper', 'Pot Wiper (A0)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Pot Wiper (A0)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="gnd"
                       transform="translate(62, 70)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'gnd', 'Pot GND')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'gnd', 'Pot GND');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Pot GND', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
@@ -902,7 +960,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 {/* MICRO SERVO MOTOR */}
                 {comp.type === 'servo' && (
                   <>
-                    <rect x="10" y="10" width="60" height="50" rx="4" fill="#1e3a8a" stroke="#1d4ed8" strokeWidth="1.4"/>
+                    <rect x="10" y="10" width="60" height="50" rx="4" fill="#1e3a8a" stroke={isServoPowered ? '#38bdf8' : '#1d4ed8'} strokeWidth="1.4"/>
                     <circle cx="50" cy="35" r="14" fill="#ffffff" stroke="#94a3b8" strokeWidth="1.2"/>
                     {/* Rotating Servo Arm */}
                     <g transform={`translate(50, 35) rotate(${comp.properties.angle || 90})`}>
@@ -911,31 +969,49 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     </g>
                     <text x="40" y="72" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="6.5" fontWeight="700" textAnchor="middle">SG90 SERVO</text>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="pwm"
                       transform="translate(20, 58)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'pwm', 'Servo PWM (~9)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'pwm', 'Servo PWM (~9)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Servo PWM (~9)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="vcc"
                       transform="translate(40, 58)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'vcc', 'Servo 5V')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'vcc', 'Servo 5V');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Servo 5V', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="gnd"
                       transform="translate(60, 58)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'gnd', 'Servo GND')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'gnd', 'Servo GND');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Servo GND', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
@@ -950,46 +1026,127 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     <circle cx="62" cy="31" r="6" fill="#475569"/>
                     <text x="42" y="60" fill="#cbd5e1" fontFamily="JetBrains Mono" fontSize="6.5" fontWeight="700" textAnchor="middle">HC-SR04</text>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="vcc"
                       transform="translate(15, 52)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'vcc', 'Ultrasonic 5V')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'vcc', 'Ultrasonic 5V');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Ultrasonic 5V', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="trig"
                       transform="translate(33, 52)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'trig', 'Ultrasonic Trig (D12)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'trig', 'Ultrasonic Trig (D12)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Ultrasonic Trig (D12)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="echo"
                       transform="translate(51, 52)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'echo', 'Ultrasonic Echo (D10)')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'echo', 'Ultrasonic Echo (D10)');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Ultrasonic Echo (D10)', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                     <g
-                      className="terminal-pin-group cursor-crosshair"
+                      className="terminal-pin-group cursor-crosshair group"
                       data-pin="gnd"
                       transform="translate(69, 52)"
-                      onClick={(e) => handlePinClick(e, comp.id, 'gnd', 'Ultrasonic GND')}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePinClick(e, comp.id, 'gnd', 'Ultrasonic GND');
+                      }}
+                      onMouseEnter={(e) => setHoverTooltip({ text: 'Ultrasonic GND', x: e.clientX, y: e.clientY })}
+                      onMouseLeave={() => setHoverTooltip(null)}
                     >
                       <circle className="terminal-hitbox" r="9" fill="transparent"/>
-                      <circle className="terminal-pin" r="3.8" fill="url(#pinMetal)"/>
+                      <circle className="terminal-pin transition-all" r="4" fill="url(#pinMetal)" stroke="#09111e" strokeWidth="1.5"/>
                     </g>
                   </>
                 )}
               </g>
             );
           })}
+        </g>
+
+        {/* LAYER 3: WIRES (Rendered on top for clarity and easy disconnection) */}
+        <g id="layerWires">
+          {wires.map((wire) => {
+            const start = getPinCoordinates(wire.fromCompId, wire.fromPinId);
+            const end = getPinCoordinates(wire.toCompId, wire.toPinId);
+            const dx = Math.abs(end.x - start.x) * 0.5;
+            const dy = (end.y - start.y) * 0.5;
+            const d = `M ${start.x} ${start.y} C ${start.x + dx} ${start.y + dy}, ${end.x - dx} ${end.y - dy}, ${end.x} ${end.y}`;
+
+            return (
+              <g key={wire.id} className="cursor-pointer group">
+                {/* Glow & wire path */}
+                <path
+                  d={d}
+                  fill="none"
+                  stroke={wire.color}
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                  className="transition-all hover:stroke-[6.5px] hover:filter-[drop-shadow(0_0_8px_currentColor)]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteWire(wire.id);
+                  }}
+                />
+                {/* Terminal Connection Solder Beads */}
+                <circle cx={start.x} cy={start.y} r="4.5" fill={wire.color} stroke="#ffffff" strokeWidth="1.2" className="pointer-events-none" />
+                <circle cx={end.x} cy={end.y} r="4.5" fill={wire.color} stroke="#ffffff" strokeWidth="1.2" className="pointer-events-none" />
+                <title>Click to disconnect wire</title>
+              </g>
+            );
+          })}
+
+          {/* GHOST WIRE (when actively routing) */}
+          {activePin && (
+            (() => {
+              const start = getPinCoordinates(activePin.compId, activePin.pinId);
+              const dx = Math.abs(mousePos.x - start.x) * 0.5;
+              const dy = (mousePos.y - start.y) * 0.5;
+              const d = `M ${start.x} ${start.y} C ${start.x + dx} ${start.y + dy}, ${mousePos.x - dx} ${mousePos.y - dy}, ${mousePos.x} ${mousePos.y}`;
+              return (
+                <g className="pointer-events-none">
+                  <path
+                    d={d}
+                    fill="none"
+                    stroke={activeWireColor}
+                    strokeWidth="3.5"
+                    strokeDasharray="6 4"
+                    className="animate-pulse"
+                  />
+                  <circle cx={start.x} cy={start.y} r="4.5" fill={activeWireColor} stroke="#ffffff" strokeWidth="1.2" />
+                  <circle cx={mousePos.x} cy={mousePos.y} r="4" fill={activeWireColor} stroke="#ffffff" strokeWidth="1" />
+                </g>
+              );
+            })()
+          )}
         </g>
       </svg>
     </div>

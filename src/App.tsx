@@ -12,6 +12,7 @@ import {
 } from './types';
 import { INITIAL_FILES, PROJECT_BLUEPRINTS } from './data/curriculum';
 import { playPiezoTone, playUiClick, playWireSnap } from './utils/audio';
+import { evaluateCircuit } from './utils/circuitAnalysis';
 import { Navbar } from './components/Navbar';
 import { ComponentDrawer } from './components/ComponentDrawer';
 import { CanvasStage } from './components/CanvasStage';
@@ -111,15 +112,27 @@ export default function App() {
         D2: d2Val
       }));
 
-      // Check if buzzer is properly wired to Pin 11 and GND
-      const buzzerConnectedToD11 = wires.some(
-        w => (w.fromPinId === 'D11' && w.toPinId === 'pos') || (w.toPinId === 'D11' && w.fromPinId === 'pos')
+      // Dynamic circuit analysis to trigger buzzer audio
+      const evalResult = evaluateCircuit(
+        components,
+        wires,
+        {
+          D13: d13Val,
+          D11: pwm11Val,
+          D2: d2Val,
+          '5V': 1,
+          '3V3': 1,
+          'VIN': 1,
+          'TERM_VIN': 1,
+          'RPI_5V_1': 1,
+          'RPI_5V_2': 1,
+          'RPI_3V3': 1
+        },
+        true
       );
-      const buzzerConnectedToGnd = wires.some(
-        w => (w.fromPinId.includes('GND') && w.toPinId === 'neg') || (w.toPinId.includes('GND') && w.fromPinId === 'neg')
-      );
+      const isAnyBuzzerActive = Object.values(evalResult.activeBuzzers).some(b => b.active);
 
-      if (buzzerConnectedToD11 && buzzerConnectedToGnd && toggleState) {
+      if (isAnyBuzzerActive && toggleState) {
         playPiezoTone(587, 80);
       }
 
@@ -246,7 +259,7 @@ export default function App() {
     const newWires: CircuitWire[] = [];
 
     bp.components.forEach((cSpec, idx) => {
-      const compId = `bp_comp_${cSpec.type}_${idx}`;
+      const compId = cSpec.id || `bp_comp_${cSpec.type}_${idx}`;
       newComps.push({
         id: compId,
         type: cSpec.type,
@@ -255,18 +268,34 @@ export default function App() {
         properties: cSpec.properties || {}
       });
 
-      // Auto route wires
-      Object.entries(cSpec.pins).forEach(([pinKey, route]) => {
+      // Auto route legacy pins if defined
+      if (cSpec.pins) {
+        Object.entries(cSpec.pins).forEach(([pinKey, route]) => {
+          newWires.push({
+            id: `wire_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+            fromCompId: 'board',
+            fromPinId: route.boardPin,
+            toCompId: compId,
+            toPinId: pinKey,
+            color: route.wireColor
+          });
+        });
+      }
+    });
+
+    // Auto route explicit inter-component and board wires
+    if (bp.wires) {
+      bp.wires.forEach((w, wIdx) => {
         newWires.push({
-          id: `wire_${Date.now()}_${Math.random()}`,
-          fromCompId: 'board',
-          fromPinId: route.boardPin,
-          toCompId: compId,
-          toPinId: pinKey,
-          color: route.wireColor
+          id: `wire_bp_${wIdx}_${Date.now()}`,
+          fromCompId: w.fromCompId,
+          fromPinId: w.fromPinId,
+          toCompId: w.toCompId,
+          toPinId: w.toPinId,
+          color: w.color
         });
       });
-    });
+    }
 
     setComponents(newComps);
     setWires(newWires);

@@ -127,23 +127,24 @@ void loop() {
 }`,
     components: [
       {
+        id: 'resistor_0',
         type: 'resistor',
-        x: 230,
+        x: 210,
         y: 390,
-        properties: { resistance: 220, label: '220Ω' },
-        pins: {
-          p1: { boardPin: 'D13', wireColor: '#ef4444' }
-        }
+        properties: { resistance: 220, label: '220Ω' }
       },
       {
+        id: 'led_0',
         type: 'led',
         x: 370,
         y: 390,
-        properties: { color: 'red' },
-        pins: {
-          cathode: { boardPin: 'GND_D1', wireColor: '#1e293b' }
-        }
+        properties: { color: 'red' }
       }
+    ],
+    wires: [
+      { fromCompId: 'board', fromPinId: 'D13', toCompId: 'resistor_0', toPinId: 'p1', color: '#ef4444' },
+      { fromCompId: 'resistor_0', fromPinId: 'p2', toCompId: 'led_0', toPinId: 'anode', color: '#38bdf8' },
+      { fromCompId: 'led_0', fromPinId: 'cathode', toCompId: 'board', toPinId: 'GND_D1', color: '#1e293b' }
     ]
   },
   {
@@ -173,6 +174,7 @@ void loop() {
 }`,
     components: [
       {
+        id: 'buzzer_0',
         type: 'buzzer',
         x: 300,
         y: 390,
@@ -182,6 +184,10 @@ void loop() {
           neg: { boardPin: 'GND_D1', wireColor: '#1e293b' }
         }
       }
+    ],
+    wires: [
+      { fromCompId: 'board', fromPinId: 'D11', toCompId: 'buzzer_0', toPinId: 'pos', color: '#10b981' },
+      { fromCompId: 'buzzer_0', fromPinId: 'neg', toCompId: 'board', toPinId: 'GND_D1', color: '#1e293b' }
     ]
   },
   {
@@ -209,6 +215,7 @@ void loop() {
 }`,
     components: [
       {
+        id: 'sensor_0',
         type: 'sensor',
         x: 290,
         y: 390,
@@ -219,6 +226,11 @@ void loop() {
           out: { boardPin: 'D2', wireColor: '#38bdf8' }
         }
       }
+    ],
+    wires: [
+      { fromCompId: 'board', fromPinId: '5V', toCompId: 'sensor_0', toPinId: 'vcc', color: '#ef4444' },
+      { fromCompId: 'board', fromPinId: 'GND_P1', toCompId: 'sensor_0', toPinId: 'gnd', color: '#1e293b' },
+      { fromCompId: 'sensor_0', fromPinId: 'out', toCompId: 'board', toPinId: 'D2', color: '#38bdf8' }
     ]
   },
   {
@@ -248,6 +260,7 @@ void loop() {
 }`,
     components: [
       {
+        id: 'servo_0',
         type: 'servo',
         x: 320,
         y: 390,
@@ -258,6 +271,11 @@ void loop() {
           pwm: { boardPin: 'D9', wireColor: '#10b981' }
         }
       }
+    ],
+    wires: [
+      { fromCompId: 'board', fromPinId: '5V', toCompId: 'servo_0', toPinId: 'vcc', color: '#ef4444' },
+      { fromCompId: 'board', fromPinId: 'GND_P1', toCompId: 'servo_0', toPinId: 'gnd', color: '#1e293b' },
+      { fromCompId: 'servo_0', fromPinId: 'pwm', toCompId: 'board', toPinId: 'D9', color: '#10b981' }
     ]
   },
   {
